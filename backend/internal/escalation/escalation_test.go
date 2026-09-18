@@ -477,3 +477,100 @@ func TestEvaluateSessionNotifyErrorRetries(t *testing.T) {
 		t.Fatalf("escalated=%v notifies=%d, want fallback after retry", res.Escalated, len(notifier.notifies))
 	}
 }
+
+func secondLevelSetup(now time.Time, notifier *fakeNotifier, current *time.Time) (*fakeStore, *fakeNudger, *Coordinator) {
+	worker := stuckWorker(now)
+	worker.ID = "worker-1"
+	worker.ProjectID = "p1"
+	worker.Kind = domain.KindWorker
+	worker.Harness = domain.AgentHarness("opencode")
+	orch := domain.SessionRecord{
+		ID:        "orch-1",
+		ProjectID: "p1",
+		Kind:      domain.KindOrchestrator,
+		Harness:   domain.AgentHarness("opencode"),
+		Activity:  domain.Activity{State: domain.ActivityIdle, LastActivityAt: now},
+	}
+	store := &fakeStore{sessions: []domain.SessionRecord{orch, worker}, prs: map[domain.SessionID][]domain.PullRequest{}}
+	nudger := &fakeNudger{}
+	cfg := Config{Clock: func() time.Time { return *current }}
+	// Assign only when non-nil: storing a nil *fakeNotifier in the
+	// interface would make it non-nil and defeat the disabled fallback.
+	if notifier != nil {
+		cfg.Notifier = notifier
+	}
+	coord := New(store, nudger, cfg)
+	return store, nudger, coord
+}
+
+func TestSecondLevelNotifiesHumanWhenOrchestratorIgnores(t *testing.T) {
+	now := time.Date(2026, 9, 18, 12, 0, 0, 0, time.UTC)
+	current := now
+	notifier := &fakeNotifier{}
+	store, nudger, coord := secondLevelSetup(now, notifier, &current)
+	ctx := context.Background()
+
+	// First sweep: orchestrator nudged, human untouched.
+	if _, err := coord.EvaluateSession(ctx, "worker-1"); err != nil {
+		t.Fatal(err)
+	}
+	if len(nudger.calls) != 1 || len(notifier.notifies) != 0 {
+		t.Fatalf("nudges=%d notifies=%d, want 1/0", len(nudger.calls), len(notifier.notifies))
+	}
+	// Still stuck past the second level: loop the human in, once.
+	current = now.Add(31 * time.Minute)
+	res, err := coord.EvaluateSession(ctx, "worker-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.Escalated {
+		t.Fatalf("second level did not escalate: %+v", res)
+	}
+	if len(nudger.calls) != 1 || len(notifier.notifies) != 1 {
+		t.Fatalf("nudges=%d notifies=%d, want 1/1", len(nudger.calls), len(notifier.notifies))
+	}
+	if notifier.notifies[0].SessionID != "worker-1" || notifier.notifies[0].Type != domain.NotificationNeedsInput {
+		t.Fatalf("intent=%+v, want needs_input for worker-1", notifier.notifies[0])
+	}
+	// Further sweeps stay quiet.
+	if _, err := coord.EvaluateSession(ctx, "worker-1"); err != nil {
+		t.Fatal(err)
+	}
+	if len(nudger.calls) != 1 || len(notifier.notifies) != 1 {
+		t.Fatalf("nudges=%d notifies=%d after third sweep, want still 1/1", len(nudger.calls), len(notifier.notifies))
+	}
+	// Worker recovers: the human fallback resolves.
+	for i := range store.sessions {
+		if store.sessions[i].ID == "worker-1" {
+			store.sessions[i].Activity.LastActivityAt = current.Add(-time.Minute)
+		}
+	}
+	if _, err := coord.EvaluateSession(ctx, "worker-1"); err != nil {
+		t.Fatal(err)
+	}
+	if len(notifier.resolves) != 1 {
+		t.Fatalf("resolves=%d, want the second-level fallback closed on recovery", len(notifier.resolves))
+	}
+}
+
+func TestSecondLevelSkippedWithoutNotifier(t *testing.T) {
+	now := time.Date(2026, 9, 18, 12, 0, 0, 0, time.UTC)
+	current := now
+	_, nudger, coord := secondLevelSetup(now, nil, &current)
+	ctx := context.Background()
+
+	if _, err := coord.EvaluateSession(ctx, "worker-1"); err != nil {
+		t.Fatal(err)
+	}
+	current = now.Add(time.Hour)
+	res, err := coord.EvaluateSession(ctx, "worker-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Escalated || res.Reason != "already_escalated" {
+		t.Fatalf("escalated=%v reason=%q, want quiet dedup without notifier", res.Escalated, res.Reason)
+	}
+	if len(nudger.calls) != 1 {
+		t.Fatalf("nudges=%d, want no re-nudge", len(nudger.calls))
+	}
+}

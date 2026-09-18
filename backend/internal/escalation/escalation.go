@@ -45,6 +45,11 @@ const (
 	// exit is escalated. Short enough to catch crashed workers, long enough
 	// to let a normal teardown settle.
 	DefaultExitedAfter = 10 * time.Minute
+	// DefaultSecondLevelAfter bounds how long an episode may sit with only
+	// the orchestrator informed. Past it, the orchestrator had its chance
+	// (or is itself stuck) and the human is looped in too. This is what
+	// keeps a silent orchestrator from swallowing reports forever.
+	DefaultSecondLevelAfter = 30 * time.Minute
 	// DefaultSweepInterval is the cadence for reevaluating live sessions.
 	DefaultSweepInterval = time.Minute
 )
@@ -96,6 +101,13 @@ type escalationMark struct {
 	reason         string
 	lastActivityAt time.Time
 	notifiedHuman  bool
+	// escalatedAt is when the episode was first reported. It bounds the
+	// second level: an episode the orchestrator never clears escalates to
+	// the human after SecondLevelAfter.
+	escalatedAt time.Time
+	// secondLevel records that the human fallback already fired for this
+	// episode, so it stays a one-shot like the first level.
+	secondLevel bool
 }
 
 // Coordinator evaluates worker states against the live orchestrator and owns
@@ -108,6 +120,7 @@ type Coordinator struct {
 	stuckActiveAfter time.Duration
 	needsInputAfter  time.Duration
 	exitedAfter      time.Duration
+	secondLevelAfter time.Duration
 	sweepInterval    time.Duration
 	logger           *slog.Logger
 
@@ -121,6 +134,9 @@ type Config struct {
 	StuckActiveAfter time.Duration
 	NeedsInputAfter  time.Duration
 	ExitedAfter      time.Duration
+	// SecondLevelAfter bounds an episode with only the orchestrator
+	// informed before the human is looped in too.
+	SecondLevelAfter time.Duration
 	SweepInterval    time.Duration
 	Logger           *slog.Logger
 	// Notifier is the human fallback when no live orchestrator can take an
@@ -138,6 +154,7 @@ func New(store Store, nudger Nudger, cfg Config) *Coordinator {
 		stuckActiveAfter: cfg.StuckActiveAfter,
 		needsInputAfter:  cfg.NeedsInputAfter,
 		exitedAfter:      cfg.ExitedAfter,
+		secondLevelAfter: cfg.SecondLevelAfter,
 		sweepInterval:    cfg.SweepInterval,
 		logger:           cfg.Logger,
 		escalated:        make(map[domain.SessionID]escalationMark),
@@ -153,6 +170,9 @@ func New(store Store, nudger Nudger, cfg Config) *Coordinator {
 	}
 	if c.exitedAfter <= 0 {
 		c.exitedAfter = DefaultExitedAfter
+	}
+	if c.secondLevelAfter <= 0 {
+		c.secondLevelAfter = DefaultSecondLevelAfter
 	}
 	if c.sweepInterval <= 0 {
 		c.sweepInterval = DefaultSweepInterval
@@ -231,8 +251,23 @@ func (c *Coordinator) EvaluateSession(ctx context.Context, id domain.SessionID) 
 	}
 	c.mu.Lock()
 	if mark, dup := c.escalated[id]; dup && mark.lastActivityAt.Equal(last) && mark.reason == reason {
-		// Same episode, already reported (to the orchestrator, the human,
-		// or both): stay quiet until the worker moves again.
+		// Same episode, already reported. Stay quiet until the worker moves
+		// again — unless the episode outlives the second level: the
+		// orchestrator had its chance (or is itself stuck), so loop the
+		// human in too, once.
+		if !mark.notifiedHuman && !mark.secondLevel && c.notifier != nil &&
+			now.Sub(mark.escalatedAt) >= c.secondLevelAfter {
+			mark.secondLevel = true
+			mark.notifiedHuman = true
+			c.escalated[id] = mark
+			c.mu.Unlock()
+			if err := c.notifyHumanIntent(ctx, worker); err != nil {
+				return Result{}, err
+			}
+			c.logger.Info("escalation: episode unhandled, notified human",
+				"session_id", id, "reason", reason)
+			return Result{Escalated: true, Reason: reason}, nil
+		}
 		c.mu.Unlock()
 		return Result{Reason: "already_escalated"}, nil
 	}
@@ -271,7 +306,7 @@ func (c *Coordinator) EvaluateSession(ctx context.Context, id domain.SessionID) 
 		return Result{Reason: outcome.String()}, err
 	}
 	c.mu.Lock()
-	c.escalated[id] = escalationMark{reason: reason, lastActivityAt: last}
+	c.escalated[id] = escalationMark{reason: reason, lastActivityAt: last, escalatedAt: now}
 	c.mu.Unlock()
 	c.logger.Info("escalation: escalated worker state to orchestrator",
 		"session_id", id, "orchestrator_id", orchestrator.ID, "reason", reason)
@@ -285,25 +320,32 @@ func (c *Coordinator) notifyHuman(ctx context.Context, id domain.SessionID, work
 	if c.notifier == nil {
 		return Result{Reason: "no_orchestrator"}, nil
 	}
-	name := worker.DisplayName
-	if name == "" {
-		name = string(id)
-	}
-	if err := c.notifier.Notify(ctx, ports.NotificationIntent{
-		Type:               domain.NotificationNeedsInput,
-		SessionID:          id,
-		ProjectID:          worker.ProjectID,
-		CreatedAt:          last,
-		SessionDisplayName: name,
-	}); err != nil {
+	if err := c.notifyHumanIntent(ctx, worker); err != nil {
 		return Result{}, err
 	}
 	c.mu.Lock()
-	c.escalated[id] = escalationMark{reason: reason, lastActivityAt: last, notifiedHuman: true}
+	c.escalated[id] = escalationMark{reason: reason, lastActivityAt: last, notifiedHuman: true, escalatedAt: c.clock()}
 	c.mu.Unlock()
 	c.logger.Info("escalation: no orchestrator, notified human",
 		"session_id", id, "reason", reason)
 	return Result{Escalated: true, Reason: reason}, nil
+}
+
+// notifyHumanIntent delivers the human fallback notification itself. Mark
+// bookkeeping stays with the caller so first-level, no-orchestrator, and
+// second-level deliveries share one send path.
+func (c *Coordinator) notifyHumanIntent(ctx context.Context, worker domain.SessionRecord) error {
+	name := worker.DisplayName
+	if name == "" {
+		name = string(worker.ID)
+	}
+	return c.notifier.Notify(ctx, ports.NotificationIntent{
+		Type:               domain.NotificationNeedsInput,
+		SessionID:          worker.ID,
+		ProjectID:          worker.ProjectID,
+		CreatedAt:          worker.Activity.LastActivityAt,
+		SessionDisplayName: name,
+	})
 }
 
 // notifyResolve closes a human fallback once its worker moves again.
