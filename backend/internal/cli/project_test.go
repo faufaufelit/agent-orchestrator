@@ -240,7 +240,7 @@ func TestProjectGet_NotFound(t *testing.T) {
 
 func TestProjectSetConfig_RulesFlags(t *testing.T) {
 	cfg := setConfigEnv(t)
-	srv, capture := projectServer(t, http.StatusOK, `{"status":"ok","project":{"id":"demo","config":{"agentRules":"Run tests.","agentRulesFile":"docs/rules.md","orchestratorRules":"Delegate."}}}`)
+	srv, capture := projectServer(t, http.StatusOK, `{"status":"ok","project":{"id":"demo","config":{"agentRules":"Run tests.","agentRulesFile":"docs/rules.md","orchestratorRules":"Delegate.","orchestratorRulesFile":"docs/orchestrator.md"}}}`)
 	writeRunFileFor(t, cfg, srv)
 
 	out, errOut, err := executeCLI(t, Deps{
@@ -249,6 +249,7 @@ func TestProjectSetConfig_RulesFlags(t *testing.T) {
 		"--agent-rules", "Run tests.",
 		"--agent-rules-file", "docs/rules.md",
 		"--orchestrator-rules", "Delegate.",
+		"--orchestrator-rules-file", "docs/orchestrator.md",
 	)
 	if err != nil {
 		t.Fatalf("unexpected error: %v\nstderr=%s", err, errOut)
@@ -260,7 +261,7 @@ func TestProjectSetConfig_RulesFlags(t *testing.T) {
 	if err := json.Unmarshal(capture.body, &got); err != nil {
 		t.Fatalf("decode request body: %v\nbody=%s", err, capture.body)
 	}
-	if got.Config.AgentRules != "Run tests." || got.Config.AgentRulesFile != "docs/rules.md" || got.Config.OrchestratorRules != "Delegate." {
+	if got.Config.AgentRules != "Run tests." || got.Config.AgentRulesFile != "docs/rules.md" || got.Config.OrchestratorRules != "Delegate." || got.Config.OrchestratorRulesFile != "docs/orchestrator.md" {
 		t.Fatalf("rules config = %#v", got.Config)
 	}
 	if !strings.Contains(out, "updated config for project demo") {

@@ -181,6 +181,25 @@ func TestProjectRelativeFileRejectsTraversal(t *testing.T) {
 	}
 }
 
+func TestBuildOrchestratorRules_ReadsInlineAndFileRules(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "orchestrator.md"), []byte("File persona.\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	got, err := buildOrchestratorRules(dir, "Inline charter.", "orchestrator.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"Inline charter.", "File persona."} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("orchestrator rules missing %q:\n%s", want, got)
+		}
+	}
+	if _, err := buildOrchestratorRules(dir, "", "missing.md"); err == nil {
+		t.Fatal("expected missing orchestrator rules file to fail spawn loudly")
+	}
+}
+
 func TestBuildSystemPromptPreservesPublishingScope(t *testing.T) {
 	for _, role := range []sessionPromptRole{sessionPromptRoleWorker, sessionPromptRoleOrchestrator} {
 		for _, repo := range []string{"", "https://github.com/acme/repo"} {

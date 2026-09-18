@@ -115,9 +115,10 @@ type projectConfig struct {
 	Env               map[string]string    `json:"env,omitempty"`
 	Symlinks          []string             `json:"symlinks,omitempty"`
 	PostCreate        []string             `json:"postCreate,omitempty"`
-	AgentRules        string               `json:"agentRules,omitempty"`
-	AgentRulesFile    string               `json:"agentRulesFile,omitempty"`
-	OrchestratorRules string               `json:"orchestratorRules,omitempty"`
+	AgentRules          string               `json:"agentRules,omitempty"`
+	AgentRulesFile      string               `json:"agentRulesFile,omitempty"`
+	OrchestratorRules   string               `json:"orchestratorRules,omitempty"`
+	OrchestratorRulesFile string             `json:"orchestratorRulesFile,omitempty"`
 	AgentConfig       agentConfig          `json:"agentConfig,omitempty"`
 	Worker            roleOverride         `json:"worker,omitempty"`
 	Orchestrator      roleOverride         `json:"orchestrator,omitempty"`
@@ -140,9 +141,10 @@ type projectSetConfigOptions struct {
 	permission        string
 	workerAgent       string
 	orchestratorAgent string
-	agentRules        string
-	agentRulesFile    string
-	orchestratorRules string
+	agentRules          string
+	agentRulesFile      string
+	orchestratorRules   string
+	orchestratorRulesFile string
 	env               []string
 	symlink           []string
 	postCreate        []string
@@ -336,6 +338,7 @@ func newProjectSetConfigCommand(ctx *commandContext) *cobra.Command {
 	f.StringVar(&opts.agentRules, "agent-rules", "", "Project-specific standing instructions for worker sessions")
 	f.StringVar(&opts.agentRulesFile, "agent-rules-file", "", "Repo-relative file containing worker standing instructions")
 	f.StringVar(&opts.orchestratorRules, "orchestrator-rules", "", "Project-specific standing instructions for orchestrator sessions")
+	f.StringVar(&opts.orchestratorRulesFile, "orchestrator-rules-file", "", "Repo-relative file containing orchestrator standing instructions")
 	f.StringArrayVar(&opts.env, "env", nil, "Env var KEY=VALUE forwarded into sessions (repeatable)")
 	f.StringArrayVar(&opts.symlink, "symlink", nil, "Repo-relative path to symlink into workspaces (repeatable)")
 	f.StringArrayVar(&opts.postCreate, "post-create", nil, "Command to run after workspace creation (repeatable)")
@@ -376,9 +379,10 @@ func buildProjectConfig(opts projectSetConfigOptions) (projectConfig, error) {
 		Env:               env,
 		Symlinks:          opts.symlink,
 		PostCreate:        opts.postCreate,
-		AgentRules:        opts.agentRules,
-		AgentRulesFile:    opts.agentRulesFile,
-		OrchestratorRules: opts.orchestratorRules,
+		AgentRules:          opts.agentRules,
+		AgentRulesFile:      opts.agentRulesFile,
+		OrchestratorRules:   opts.orchestratorRules,
+		OrchestratorRulesFile: opts.orchestratorRulesFile,
 		AgentConfig:       agentConfig{Model: opts.model, Permissions: opts.permission},
 		Worker:            roleOverride{Agent: opts.workerAgent},
 		Orchestrator:      roleOverride{Agent: opts.orchestratorAgent},

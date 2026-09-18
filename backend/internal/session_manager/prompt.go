@@ -45,6 +45,31 @@ type projectRulesConfig struct {
 	AgentRulesFile string
 }
 
+// buildOrchestratorRules loads orchestrator rules from inline config and a
+// repo-relative rules file. It mirrors buildProjectRules: a missing or
+// unreadable file fails spawn loudly instead of silently dropping the
+// orchestrator's persona, memory discipline, and delegation policy.
+func buildOrchestratorRules(projectPath, inline, file string) (string, error) {
+	parts := make([]string, 0, 2)
+	if rules := strings.TrimSpace(inline); rules != "" {
+		parts = append(parts, rules)
+	}
+	if rel := strings.TrimSpace(file); rel != "" {
+		path, err := projectRelativeFile(projectPath, rel)
+		if err != nil {
+			return "", fmt.Errorf("orchestratorRulesFile: %w", err)
+		}
+		data, err := os.ReadFile(path) //nolint:gosec // path is project config validated as repo-relative
+		if err != nil {
+			return "", fmt.Errorf("read orchestratorRulesFile %s: %w", rel, err)
+		}
+		if rules := strings.TrimSpace(string(data)); rules != "" {
+			parts = append(parts, rules)
+		}
+	}
+	return strings.Join(parts, "\n\n"), nil
+}
+
 func buildTaskPrompt(cfg taskPromptConfig) string {
 	issueContext := strings.TrimSpace(cfg.IssueContext)
 	if cfg.Prompt != "" {
