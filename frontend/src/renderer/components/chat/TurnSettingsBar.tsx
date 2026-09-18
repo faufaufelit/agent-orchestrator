@@ -210,6 +210,7 @@ export function TurnSettingsBar({
 							extraOptions={grouped.extra}
 							disabled={optionDisabled}
 							onChange={applyOption}
+							storedEffort={settings.reasoningEffort}
 						/>
 					) : null}
 
@@ -412,6 +413,7 @@ function ClubbedConfigPicker({
 	extraOptions,
 	disabled,
 	onChange,
+	storedEffort,
 }: {
 	modelOptions: ChatConfigOption[];
 	effortOptions: ChatConfigOption[];
@@ -420,11 +422,21 @@ function ClubbedConfigPicker({
 	extraOptions: ChatConfigOption[];
 	disabled?: boolean;
 	onChange: (optionId: string, value: ChatConfigOptionValue) => void;
+	/**
+	 * The conversation's stored effort pick. The provider reverts its session
+	 * effort to default between turns while AO re-applies the stored pick on
+	 * every turn, so the trigger must advertise the stored pick — what the
+	 * next turn will actually be sent with — not the provider's reverted
+	 * Current value. Mirrors ModelEffortPicker's settings-first label above.
+	 */
+	storedEffort?: string;
 }) {
 	const primaryModel = modelOptions[0];
 	const primaryEffort = effortOptions[0];
 	const modelLabel = primaryModel ? optionCurrentLabel(primaryModel) : undefined;
-	const effortLabel = primaryEffort ? optionCurrentLabel(primaryEffort) : undefined;
+	const effortLabel = storedEffort
+		? capitalize(storedEffort)
+		: primaryEffort ? optionCurrentLabel(primaryEffort) : undefined;
 	const groupLabel = [modelLabel, effortLabel].filter(Boolean).join(" ") || "More";
 	const leftCount =
 		modelOptions.length + effortOptions.length + Number(Boolean(executionMode)) + toggles.length + extraOptions.length;

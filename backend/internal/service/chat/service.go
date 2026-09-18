@@ -1541,7 +1541,7 @@ func (s *Service) SetConfigOption(
 	}
 	options = permissionConfigOptions(record.Harness, options)
 	previous := controller.Settings()
-	settings, _ := settingsFromConfigOptions(previous, options)
+	settings, _ := settingsFromConfigOptions(previous, options, configID)
 	if record.Harness == domain.HarnessOpenCode && configID == "mode" {
 		for _, option := range options {
 			if option.ID == "mode" {
@@ -1576,30 +1576,56 @@ func restoreOpenCodeMode(ctx context.Context, conv ports.ChatConversation, mode 
 	return fmt.Errorf("restore OpenCode mode %q: provider did not confirm selected mode", mode)
 }
 
+// settingsFromConfigOptions re-derives the durable conversation settings from
+// the provider's live catalog after one option changed.
+//
+// Model and approval always follow the live catalog. Effort is sticky: the
+// provider reverts its session effort to default between turns, so an
+// unrelated change (approval, mode, toggles) must not clobber the stored
+// pick from that revert — otherwise users re-pick effort for every message.
+// The stored effort moves only when the user changes effort itself (even a
+// clear is honored), when the model changes (the provider resets variants on
+// a model change), or when the provider stops advertising effort at all.
 func settingsFromConfigOptions(
 	settings domain.ConversationSettings,
 	options []ports.ChatConfigOption,
+	changedID string,
 ) (domain.ConversationSettings, bool) {
 	next := settings
+	var liveEffort string
 	hasEffort := false
+	changedIsEffort := false
+	changedIsModel := false
 	for _, option := range options {
 		for _, choice := range option.Choices {
 			if choice.Value == option.Current.Select && choice.PermissionMode != "" {
 				next.ApprovalMode = choice.PermissionMode
 			}
 		}
+		changed := option.ID == changedID
 		switch {
 		case option.ID == "model" || option.Category == "model":
 			if option.Current.Select != "" {
 				next.Model = option.Current.Select
 			}
+			if changed {
+				changedIsModel = true
+			}
 		case option.ID == "effort" || option.Category == "thought_level":
 			hasEffort = true
-			next.ReasoningEffort = option.Current.Select
+			liveEffort = option.Current.Select
+			if changed {
+				changedIsEffort = true
+			}
 		}
 	}
-	if !hasEffort {
+	switch {
+	case changedIsEffort || changedIsModel:
+		next.ReasoningEffort = liveEffort
+	case !hasEffort:
 		next.ReasoningEffort = ""
+	default:
+		// Unrelated change while effort is still offered: keep the pick.
 	}
 	return next, next != settings
 }

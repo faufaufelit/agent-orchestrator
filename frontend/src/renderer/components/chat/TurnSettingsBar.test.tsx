@@ -586,6 +586,44 @@ describe("ACP session config options", () => {
 		);
 	});
 
+	it("shows the stored effort pick on the native trigger when the provider reverted to default", () => {
+		const revertedEffort: ChatConfigOption = {
+			id: "effort",
+			name: "Effort",
+			category: "thought_level",
+			type: "select",
+			currentValue: "default",
+			choices: [
+				{ value: "default", name: "Default" },
+				{ value: "high", name: "High" },
+			],
+		};
+		const { rerender } = render(
+			<TurnSettingsBar
+				models={[]}
+				settings={{ reasoningEffort: "high" }}
+				configOptions={[OPTIONS[0], revertedEffort]}
+				onChangeConfigOption={vi.fn()}
+			/>,
+		);
+
+		expect(
+			screen.getByRole("button", { name: "Model and reasoning effort for the next turn" }),
+		).toHaveTextContent("High");
+
+		rerender(
+			<TurnSettingsBar
+				models={[]}
+				settings={{}}
+				configOptions={[OPTIONS[0], revertedEffort]}
+				onChangeConfigOption={vi.fn()}
+			/>,
+		);
+		expect(
+			screen.getByRole("button", { name: "Model and reasoning effort for the next turn" }),
+		).toHaveTextContent("Default");
+	});
+
 	it("labels bypass permission policy plainly", () => {
 		render(
 			<TurnSettingsBar
