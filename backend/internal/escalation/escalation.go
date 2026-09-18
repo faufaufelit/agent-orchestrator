@@ -244,14 +244,18 @@ func (c *Coordinator) Sweep(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	evaluated := 0
 	for _, session := range sessions {
 		if session.Kind != domain.KindWorker || session.IsTerminated {
 			continue
 		}
 		if _, err := c.EvaluateSession(ctx, session.ID); err != nil {
 			c.logger.Error("escalation: evaluate session failed", "session_id", session.ID, "err", err)
+		} else {
+			evaluated++
 		}
 	}
+	c.logger.Debug("escalation: sweep complete", "workers_evaluated", evaluated)
 	return nil
 }
 
