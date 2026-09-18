@@ -92,6 +92,37 @@ type sessionResponse struct {
 	Session sessionDTO `json:"session"`
 }
 
+type sessionBriefFileDTO struct {
+	Path         string `json:"path"`
+	PreviousPath string `json:"previousPath,omitempty"`
+	Status       string `json:"status"`
+	Additions    int    `json:"additions"`
+	Deletions    int    `json:"deletions"`
+}
+
+type sessionBriefCommitDTO struct {
+	SHA       string `json:"sha"`
+	Subject   string `json:"subject"`
+	Author    string `json:"author"`
+	Timestamp string `json:"timestamp"`
+}
+
+// sessionBriefResponse mirrors the daemon's @mention brief: identity,
+// derived status and PRs plus a bounded changed-files/commit summary.
+type sessionBriefResponse struct {
+	Session            sessionDTO              `json:"session"`
+	WorkspaceAvailable bool                    `json:"workspaceAvailable"`
+	ChangedFiles       []sessionBriefFileDTO   `json:"changedFiles"`
+	ChangedFilesTotal  int                     `json:"changedFilesTotal"`
+	ChangedFilesCapped bool                    `json:"changedFilesCapped"`
+	Commits            []sessionBriefCommitDTO `json:"commits"`
+	CommitsCapped      bool                    `json:"commitsCapped"`
+	Additions          int                     `json:"additions"`
+	Deletions          int                     `json:"deletions"`
+	Ahead              *int                    `json:"ahead,omitempty"`
+	Behind             *int                    `json:"behind,omitempty"`
+}
+
 type killSessionResponse struct {
 	SessionID string `json:"sessionId"`
 	Freed     bool   `json:"freed"`
@@ -193,6 +224,7 @@ func newSessionCommand(ctx *commandContext) *cobra.Command {
 	}
 	cmd.AddCommand(newSessionListCommand(ctx))
 	cmd.AddCommand(newSessionGetCommand(ctx))
+	cmd.AddCommand(newSessionBriefCommand(ctx))
 	cmd.AddCommand(newSessionKillCommand(ctx))
 	cmd.AddCommand(newSessionRestoreCommand(ctx))
 	cmd.AddCommand(newSessionExitAgentCommand(ctx))
@@ -236,6 +268,26 @@ func newSessionGetCommand(ctx *commandContext) *cobra.Command {
 				return err
 			}
 			return ctx.getSession(cmd.Context(), cmd, id, opts)
+		},
+	}
+	f := cmd.Flags()
+	addSessionProjectFlag(f, &opts.project, "Project id to scope the lookup")
+	f.BoolVar(&opts.json, "json", false, "Output as JSON")
+	return cmd
+}
+
+func newSessionBriefCommand(ctx *commandContext) *cobra.Command {
+	var opts sessionOptions
+	cmd := &cobra.Command{
+		Use:   "brief <id>",
+		Short: "Fetch the @mention brief for one session",
+		Args:  oneSessionIDArg,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			id, err := normalizeSessionID(args[0])
+			if err != nil {
+				return err
+			}
+			return ctx.briefSession(cmd.Context(), cmd, id, opts)
 		},
 	}
 	f := cmd.Flags()
@@ -601,6 +653,106 @@ func (c *commandContext) getSession(ctx context.Context, cmd *cobra.Command, id 
 		return writeJSON(cmd.OutOrStdout(), sessionResponse{Session: sess})
 	}
 	return writeSessionDetails(cmd, sess)
+}
+
+func (c *commandContext) briefSession(ctx context.Context, cmd *cobra.Command, id string, opts sessionOptions) error {
+	if opts.project != "" {
+		if _, err := c.fetchScopedSession(ctx, id, opts.project); err != nil {
+			return err
+		}
+	}
+	var res sessionBriefResponse
+	if err := c.getJSON(ctx, "sessions/"+url.PathEscape(id)+"/brief", &res); err != nil {
+		return err
+	}
+	if opts.json {
+		return writeJSON(cmd.OutOrStdout(), res)
+	}
+	return writeSessionBrief(cmd, res)
+}
+
+func writeSessionBrief(cmd *cobra.Command, res sessionBriefResponse) error {
+	out := cmd.OutOrStdout()
+	sess := res.Session
+	name := sess.ID
+	if sess.DisplayName != "" {
+		name += " \"" + sess.DisplayName + "\""
+	}
+	if _, err := fmt.Fprintf(out, "brief %s (%s)\n", name, sess.Harness); err != nil {
+		return err
+	}
+	activity := sess.Activity.State
+	if !sess.Activity.LastActivityAt.IsZero() {
+		activity += " " + sess.Activity.LastActivityAt.Format("15:04") + " UTC"
+	}
+	if _, err := fmt.Fprintf(out, "  status: %s | activity: %s\n", sess.Status, activity); err != nil {
+		return err
+	}
+	if sess.Branch != "" {
+		if _, err := fmt.Fprintf(out, "  branch: %s\n", sess.Branch); err != nil {
+			return err
+		}
+	}
+	prs := "none"
+	if len(sess.PRs) > 0 {
+		parts := make([]string, 0, len(sess.PRs))
+		for _, pr := range sess.PRs {
+			parts = append(parts, fmt.Sprintf("#%d %s", pr.Number, pr.State))
+		}
+		prs = strings.Join(parts, ", ")
+	}
+	if _, err := fmt.Fprintf(out, "  PRs: %s\n", prs); err != nil {
+		return err
+	}
+	if !res.WorkspaceAvailable {
+		_, err := fmt.Fprintf(out, "  workspace: unavailable\n")
+		return err
+	}
+	files := fmt.Sprintf("%d file(s)", res.ChangedFilesTotal)
+	if res.ChangedFilesCapped {
+		files += " (capped)"
+	}
+	if _, err := fmt.Fprintf(out, "  files %s: +%d -%d\n", files, res.Additions, res.Deletions); err != nil {
+		return err
+	}
+	for _, file := range res.ChangedFiles {
+		if _, err := fmt.Fprintf(out, "    %s %s +%d -%d\n", briefFileStatusLabel(file.Status), file.Path, file.Additions, file.Deletions); err != nil {
+			return err
+		}
+	}
+	for _, commit := range res.Commits {
+		if _, err := fmt.Fprintf(out, "  commit %s %s\n", shortSHA(commit.SHA), commit.Subject); err != nil {
+			return err
+		}
+	}
+	if res.CommitsCapped {
+		if _, err := fmt.Fprintf(out, "  ... (capped)\n"); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func briefFileStatusLabel(status string) string {
+	switch status {
+	case "added":
+		return "A"
+	case "modified":
+		return "M"
+	case "deleted":
+		return "D"
+	case "renamed":
+		return "R"
+	default:
+		return "?"
+	}
+}
+
+func shortSHA(sha string) string {
+	if len(sha) > 7 {
+		return sha[:7]
+	}
+	return sha
 }
 
 func (c *commandContext) killSession(ctx context.Context, cmd *cobra.Command, id string, opts sessionOptions) error {

@@ -3170,6 +3170,39 @@ paths:
       summary: Enable or disable automatic review for a session
       tags:
       - sessions
+  /api/v1/sessions/{sessionId}/brief:
+    get:
+      operationId: getSessionBrief
+      parameters:
+      - description: Session identifier, e.g. project-1.
+        in: path
+        name: sessionId
+        required: true
+        schema:
+          description: Session identifier, e.g. project-1.
+          type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SessionBriefResponse'
+          description: OK
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Found
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Internal Server Error
+      summary: Fetch the @mention brief for one session
+      tags:
+      - sessions
   /api/v1/sessions/{sessionId}/conversation:
     get:
       operationId: getSessionConversation
@@ -10964,6 +10997,83 @@ components:
       - ok
       - sessionId
       - message
+      type: object
+    SessionBriefCommit:
+      properties:
+        author:
+          type: string
+        sha:
+          type: string
+        subject:
+          type: string
+        timestamp:
+          type: string
+      required:
+      - sha
+      - subject
+      - author
+      - timestamp
+      type: object
+    SessionBriefFile:
+      properties:
+        additions:
+          type: integer
+        deletions:
+          type: integer
+        path:
+          type: string
+        previousPath:
+          type: string
+        status:
+          type: string
+      required:
+      - path
+      - status
+      - additions
+      - deletions
+      type: object
+    SessionBriefResponse:
+      properties:
+        additions:
+          type: integer
+        ahead:
+          type:
+          - "null"
+          - integer
+        behind:
+          type:
+          - "null"
+          - integer
+        changedFiles:
+          items:
+            $ref: '#/components/schemas/SessionBriefFile'
+          type: array
+        changedFilesCapped:
+          type: boolean
+        changedFilesTotal:
+          type: integer
+        commits:
+          items:
+            $ref: '#/components/schemas/SessionBriefCommit'
+          type: array
+        commitsCapped:
+          type: boolean
+        deletions:
+          type: integer
+        session:
+          $ref: '#/components/schemas/ControllersSessionView'
+        workspaceAvailable:
+          type: boolean
+      required:
+      - session
+      - workspaceAvailable
+      - changedFiles
+      - changedFilesTotal
+      - changedFilesCapped
+      - commits
+      - commitsCapped
+      - additions
+      - deletions
       type: object
     SessionInterfaceTransition:
       properties:

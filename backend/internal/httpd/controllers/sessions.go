@@ -84,6 +84,7 @@ type SessionService interface {
 	Spawn(ctx context.Context, cfg ports.SpawnConfig) (domain.Session, int, int, error)
 	SpawnOrchestrator(ctx context.Context, projectID domain.ProjectID, clean bool, requestedMode domain.SessionMode) (domain.Session, error)
 	Get(ctx context.Context, id domain.SessionID) (domain.Session, error)
+	Brief(ctx context.Context, id domain.SessionID) (sessionsvc.SessionBrief, error)
 	Restore(ctx context.Context, id domain.SessionID) (sessionsvc.RestoreOutcome, error)
 	ExitAgent(ctx context.Context, id domain.SessionID) (sessionsvc.ExitAgentOutcome, error)
 	ResumeAgent(ctx context.Context, id domain.SessionID) (sessionsvc.ResumeAgentOutcome, error)
@@ -168,6 +169,7 @@ func (c *SessionsController) Register(r chi.Router) {
 	r.Post("/sessions", c.spawn)
 	r.Post("/sessions/cleanup", c.cleanup)
 	r.Get("/sessions/{sessionId}", c.get)
+	r.Get("/sessions/{sessionId}/brief", c.brief)
 	r.Get("/sessions/{sessionId}/preview", c.preview)
 	r.Post("/sessions/{sessionId}/preview", c.setPreview)
 	r.Delete("/sessions/{sessionId}/preview", c.clearPreview)
@@ -405,6 +407,19 @@ func (c *SessionsController) get(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	envelope.WriteJSON(w, http.StatusOK, SessionResponse{Session: sessionView(sess)})
+}
+
+func (c *SessionsController) brief(w http.ResponseWriter, r *http.Request) {
+	if c.Svc == nil {
+		apispec.NotImplemented(w, r, "GET", "/api/v1/sessions/{sessionId}/brief")
+		return
+	}
+	brief, err := c.Svc.Brief(r.Context(), sessionID(r))
+	if err != nil {
+		envelope.WriteError(w, r, err)
+		return
+	}
+	envelope.WriteJSON(w, http.StatusOK, sessionBriefResponse(brief))
 }
 
 func (c *SessionsController) preview(w http.ResponseWriter, r *http.Request) {
@@ -2058,6 +2073,40 @@ func sessionPRSummaries(prs []sessionsvc.PRSummary) []SessionPRSummary {
 	out := make([]SessionPRSummary, 0, len(prs))
 	for _, pr := range prs {
 		out = append(out, NewSessionPRSummary(pr))
+	}
+	return out
+}
+
+func sessionBriefResponse(brief sessionsvc.SessionBrief) SessionBriefResponse {
+	out := SessionBriefResponse{
+		Session:            sessionView(brief.Session),
+		WorkspaceAvailable: brief.WorkspaceAvailable,
+		ChangedFilesTotal:  brief.ChangedFilesTotal,
+		ChangedFilesCapped: brief.ChangedFilesCapped,
+		CommitsCapped:      brief.CommitsCapped,
+		Additions:          brief.Additions,
+		Deletions:          brief.Deletions,
+		Ahead:              brief.Ahead,
+		Behind:             brief.Behind,
+	}
+	out.ChangedFiles = make([]SessionBriefFile, 0, len(brief.ChangedFiles))
+	for _, file := range brief.ChangedFiles {
+		out.ChangedFiles = append(out.ChangedFiles, SessionBriefFile{
+			Path:         file.Path,
+			PreviousPath: file.PreviousPath,
+			Status:       string(file.Status),
+			Additions:    file.Additions,
+			Deletions:    file.Deletions,
+		})
+	}
+	out.Commits = make([]SessionBriefCommit, 0, len(brief.Commits))
+	for _, commit := range brief.Commits {
+		out.Commits = append(out.Commits, SessionBriefCommit{
+			SHA:       commit.SHA,
+			Subject:   commit.Subject,
+			Author:    commit.Author,
+			Timestamp: commit.Timestamp,
+		})
 	}
 	return out
 }

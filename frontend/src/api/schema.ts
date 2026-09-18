@@ -1271,6 +1271,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/sessions/{sessionId}/brief": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Fetch the @mention brief for one session */
+        get: operations["getSessionBrief"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/sessions/{sessionId}/conversation": {
         parameters: {
             query?: never;
@@ -3882,6 +3899,32 @@ export interface components {
             message: string;
             ok: boolean;
             sessionId: string;
+        };
+        SessionBriefCommit: {
+            author: string;
+            sha: string;
+            subject: string;
+            timestamp: string;
+        };
+        SessionBriefFile: {
+            additions: number;
+            deletions: number;
+            path: string;
+            previousPath?: string;
+            status: string;
+        };
+        SessionBriefResponse: {
+            additions: number;
+            ahead?: null | number;
+            behind?: null | number;
+            changedFiles: components["schemas"]["SessionBriefFile"][];
+            changedFilesCapped: boolean;
+            changedFilesTotal: number;
+            commits: components["schemas"]["SessionBriefCommit"][];
+            commitsCapped: boolean;
+            deletions: number;
+            session: components["schemas"]["ControllersSessionView"];
+            workspaceAvailable: boolean;
         };
         SessionInterfaceTransition: {
             /** Format: date-time */
@@ -8666,6 +8709,47 @@ export interface operations {
             };
             /** @description Not Implemented */
             501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    getSessionBrief: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Session identifier, e.g. project-1. */
+                sessionId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SessionBriefResponse"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Internal Server Error */
+            500: {
                 headers: {
                     [name: string]: unknown;
                 };

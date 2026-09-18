@@ -252,6 +252,26 @@ func (f *fakeSessionService) Get(_ context.Context, id domain.SessionID) (domain
 	return s, nil
 }
 
+func (f *fakeSessionService) Brief(_ context.Context, id domain.SessionID) (sessionsvc.SessionBrief, error) {
+	s, ok := f.sessions[id]
+	if !ok {
+		return sessionsvc.SessionBrief{}, apierr.NotFound("SESSION_NOT_FOUND", "Unknown session")
+	}
+	return sessionsvc.SessionBrief{
+		Session:            s,
+		WorkspaceAvailable: true,
+		ChangedFiles: []sessionsvc.BriefChangedFile{
+			{Path: "a.go", Status: sessionsvc.WorkspaceFileModified, Additions: 3, Deletions: 1},
+		},
+		ChangedFilesTotal: 1,
+		Commits: []sessionsvc.BriefCommit{
+			{SHA: "abc123", Subject: "second", Author: "AO Tests", Timestamp: "2026-09-18T12:00:00Z"},
+		},
+		Additions: 3,
+		Deletions: 1,
+	}, nil
+}
+
 func (f *fakeSessionService) SetPreview(_ context.Context, id domain.SessionID, previewURL string) (domain.Session, error) {
 	s, ok := f.sessions[id]
 	if !ok {
@@ -868,6 +888,53 @@ func TestSessionsAPIActiveSwitchProjectionRedactsPrivateFacts(t *testing.T) {
 	mustJSON(t, body, &response)
 	if response.Session.ActiveAgentSwitch == nil || response.Session.ActiveAgentSwitch.ID != "switch-active" || response.Session.ActiveAgentSwitch.State != domain.AgentSwitchStartingTarget {
 		t.Fatalf("active switch projection = %+v", response.Session.ActiveAgentSwitch)
+	}
+}
+
+func TestSessionsAPI_GetSessionBrief(t *testing.T) {
+	svc := newFakeSessionService()
+	srv := newSessionTestServer(t, svc)
+
+	body, status, _ := doRequest(t, srv, http.MethodGet, "/api/v1/sessions/ao-1/brief", "")
+	if status != http.StatusOK {
+		t.Fatalf("get session brief = %d, want 200; body=%s", status, body)
+	}
+	var response struct {
+		Session struct {
+			ID     string `json:"id"`
+			Status string `json:"status"`
+		} `json:"session"`
+		WorkspaceAvailable bool `json:"workspaceAvailable"`
+		ChangedFiles       []struct {
+			Path      string `json:"path"`
+			Status    string `json:"status"`
+			Additions int    `json:"additions"`
+		} `json:"changedFiles"`
+		ChangedFilesTotal int `json:"changedFilesTotal"`
+		Commits           []struct {
+			SHA     string `json:"sha"`
+			Subject string `json:"subject"`
+		} `json:"commits"`
+		Additions int `json:"additions"`
+		Deletions int `json:"deletions"`
+	}
+	mustJSON(t, body, &response)
+	if response.Session.ID != "ao-1" || !response.WorkspaceAvailable {
+		t.Fatalf("brief head = %+v, want ao-1 available", response.Session)
+	}
+	if len(response.ChangedFiles) != 1 || response.ChangedFiles[0].Path != "a.go" || response.ChangedFiles[0].Status != "modified" {
+		t.Fatalf("changed files = %+v, want a.go modified", response.ChangedFiles)
+	}
+	if response.ChangedFilesTotal != 1 || response.Additions != 3 || response.Deletions != 1 {
+		t.Fatalf("totals = %+v", response)
+	}
+	if len(response.Commits) != 1 || response.Commits[0].Subject != "second" {
+		t.Fatalf("commits = %+v, want the second commit", response.Commits)
+	}
+
+	body, status, _ = doRequest(t, srv, http.MethodGet, "/api/v1/sessions/ghost/brief", "")
+	if status != http.StatusNotFound {
+		t.Fatalf("ghost brief = %d, want 404; body=%s", status, body)
 	}
 }
 

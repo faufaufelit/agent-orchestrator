@@ -69,6 +69,12 @@ func sessionCommandServer(t *testing.T) (*httptest.Server, *sessionRequestLog) {
 			}
 		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/sessions/demo-1":
 			_, _ = io.WriteString(w, `{"session":`+sessionJSON("demo-1", "demo", "worker", "working", false)+`}`)
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/sessions/demo-1/brief":
+			_, _ = io.WriteString(w, `{"session":`+sessionJSON("demo-1", "demo", "worker", "working", false)+
+				`,"workspaceAvailable":true,"changedFiles":[{"path":"a.go","status":"modified","additions":80,"deletions":12}],`+
+				`"changedFilesTotal":1,"changedFilesCapped":false,`+
+				`"commits":[{"sha":"abc1234567","subject":"second","author":"AO","timestamp":"2026-06-04T12:00:00Z"}],"commitsCapped":false,`+
+				`"additions":80,"deletions":12}`)
 		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/projects/demo":
 			_, _ = io.WriteString(w, `{"status":"ok","project":{"id":"demo","name":"Demo","path":"/repo/demo","repo":"https://github.com/aoagents/agent-orchestrator","defaultBranch":"main"}}`)
 		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/sessions/demo-1/pr/claim":
@@ -418,6 +424,47 @@ func TestSessionGet_JSONOutputDecodes(t *testing.T) {
 	}
 }
 
+func TestSessionBrief_TextAndJSON(t *testing.T) {
+	cfg := setConfigEnv(t)
+	srv, log := sessionCommandServer(t)
+	writeRunFileFor(t, cfg, srv)
+
+	out, errOut, err := executeCLI(t, Deps{
+		ProcessAlive: func(int) bool { return true },
+	}, "session", "brief", "demo-1", "-p", "demo")
+	if err != nil {
+		t.Fatalf("session brief failed: %v\nstderr=%s", err, errOut)
+	}
+	for _, want := range []string{"brief demo-1", "working", "M a.go +80 -12", "abc1234 second"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("brief output missing %q:\n%s", want, out)
+		}
+	}
+
+	out, errOut, err = executeCLI(t, Deps{
+		ProcessAlive: func(int) bool { return true },
+	}, "session", "brief", "demo-1", "--project", "demo", "--json")
+	if err != nil {
+		t.Fatalf("session brief --json failed: %v\nstderr=%s", err, errOut)
+	}
+	var decoded sessionBriefResponse
+	if err := json.Unmarshal([]byte(out), &decoded); err != nil {
+		t.Fatalf("session brief --json output is not decodable: %v\noutput=%s", err, out)
+	}
+	if decoded.Session.ID != "demo-1" || !decoded.WorkspaceAvailable || len(decoded.ChangedFiles) != 1 || decoded.Commits[0].SHA != "abc1234567" {
+		t.Fatalf("unexpected brief JSON: %#v", decoded)
+	}
+	want := []string{
+		"GET /api/v1/sessions/demo-1",
+		"GET /api/v1/sessions/demo-1/brief",
+		"GET /api/v1/sessions/demo-1",
+		"GET /api/v1/sessions/demo-1/brief",
+	}
+	if got := log.all(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("requests = %#v, want %#v", got, want)
+	}
+}
+
 func TestSessionKill_SuccessWithProjectScope(t *testing.T) {
 	cfg := setConfigEnv(t)
 	srv, log := sessionCommandServer(t)
@@ -708,7 +755,7 @@ func TestSessionRename_SuccessWithProjectScope(t *testing.T) {
 
 func TestSessionCommands_MissingIDIsUsageError(t *testing.T) {
 	setConfigEnv(t)
-	for _, sub := range []string{"get", "kill", "restore", "exit-agent", "resume-agent"} {
+	for _, sub := range []string{"get", "brief", "kill", "restore", "exit-agent", "resume-agent"} {
 		t.Run(sub, func(t *testing.T) {
 			_, _, err := executeCLI(t, Deps{}, "session", sub)
 			if err == nil {

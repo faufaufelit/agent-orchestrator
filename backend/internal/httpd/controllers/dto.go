@@ -332,6 +332,41 @@ type SessionResponse struct {
 	Session SessionView `json:"session"`
 }
 
+// SessionBriefResponse is the @mention context body of
+// GET /api/v1/sessions/{sessionId}/brief: identity, derived status and PRs
+// (via SessionView) plus a bounded changed-files/commit summary so one call
+// answers "où t'en es".
+type SessionBriefResponse struct {
+	Session            SessionView          `json:"session"`
+	WorkspaceAvailable bool                 `json:"workspaceAvailable"`
+	ChangedFiles       []SessionBriefFile   `json:"changedFiles"`
+	ChangedFilesTotal  int                  `json:"changedFilesTotal"`
+	ChangedFilesCapped bool                 `json:"changedFilesCapped"`
+	Commits            []SessionBriefCommit `json:"commits"`
+	CommitsCapped      bool                 `json:"commitsCapped"`
+	Additions          int                  `json:"additions"`
+	Deletions          int                  `json:"deletions"`
+	Ahead              *int                 `json:"ahead,omitempty"`
+	Behind             *int                 `json:"behind,omitempty"`
+}
+
+// SessionBriefFile is one changed file row in a session brief.
+type SessionBriefFile struct {
+	Path         string `json:"path"`
+	PreviousPath string `json:"previousPath,omitempty"`
+	Status       string `json:"status"`
+	Additions    int    `json:"additions"`
+	Deletions    int    `json:"deletions"`
+}
+
+// SessionBriefCommit is one recent commit row in a session brief.
+type SessionBriefCommit struct {
+	SHA       string `json:"sha"`
+	Subject   string `json:"subject"`
+	Author    string `json:"author"`
+	Timestamp string `json:"timestamp"`
+}
+
 // SpawnSessionResponse includes ephemeral measurements of the final assembled
 // prompt texts. The fields are required so a measured zero remains distinct
 // from a response that never measured prompt sizes.
