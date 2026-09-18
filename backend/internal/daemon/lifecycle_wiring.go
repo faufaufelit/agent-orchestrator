@@ -18,6 +18,7 @@ import (
 	scratchworkspace "github.com/aoagents/agent-orchestrator/backend/internal/adapters/workspace/scratch"
 	"github.com/aoagents/agent-orchestrator/backend/internal/config"
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
+	"github.com/aoagents/agent-orchestrator/backend/internal/escalation"
 	"github.com/aoagents/agent-orchestrator/backend/internal/lifecycle"
 	activityobserver "github.com/aoagents/agent-orchestrator/backend/internal/observe/activity"
 	"github.com/aoagents/agent-orchestrator/backend/internal/observe/reaper"
@@ -27,6 +28,7 @@ import (
 	reviewsvc "github.com/aoagents/agent-orchestrator/backend/internal/service/review"
 	sessionsvc "github.com/aoagents/agent-orchestrator/backend/internal/service/session"
 	sessionmanager "github.com/aoagents/agent-orchestrator/backend/internal/session_manager"
+	"github.com/aoagents/agent-orchestrator/backend/internal/sessionguard"
 	"github.com/aoagents/agent-orchestrator/backend/internal/storage/sqlite"
 )
 
@@ -50,6 +52,7 @@ type lifecycleStack struct {
 	autoReviewDone <-chan struct{}
 	scmDone        <-chan struct{}
 	trackerDone    <-chan struct{}
+	escalationDone <-chan struct{}
 }
 
 // startLifecycle constructs the Lifecycle Manager over the store and starts the
@@ -67,11 +70,19 @@ func startLifecycle(ctx context.Context, store *sqlite.Store, runtime ports.Runt
 	)
 	rp := reaper.New(lcm, store, runtime, reaper.Config{Logger: logger})
 	activityPoller := activityobserver.New(store, lcm, runtime, agents, activityobserver.Config{Logger: logger})
+	// The escalation escalates unattended worker states (stuck active,
+	// unattended input waits, unlanded exits) to the live orchestrator. It
+	// reuses the same store facts as the other observers and sends through
+	// its own sessionguard nudge so pane-write safety matches the lifecycle
+	// reactions exactly.
+	escalationGuard := sessionguard.New(store, messenger, logger)
+	escalationCoord := escalation.New(store, escalationGuard, escalation.Config{Logger: logger})
 	return &lifecycleStack{
-		LCM:           lcm,
-		runtimeReaper: rp,
-		reaperDone:    rp.Start(ctx),
-		activityDone:  activityPoller.Start(ctx),
+		LCM:            lcm,
+		runtimeReaper:  rp,
+		reaperDone:     rp.Start(ctx),
+		activityDone:   activityPoller.Start(ctx),
+		escalationDone: escalationCoord.Start(ctx),
 	}
 }
 
@@ -154,6 +165,9 @@ func (l *lifecycleStack) Stop() {
 	}
 	if l.trackerDone != nil {
 		<-l.trackerDone
+	}
+	if l.escalationDone != nil {
+		<-l.escalationDone
 	}
 }
 
