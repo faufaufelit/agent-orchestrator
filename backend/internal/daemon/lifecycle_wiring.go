@@ -70,13 +70,14 @@ func startLifecycle(ctx context.Context, store *sqlite.Store, runtime ports.Runt
 	)
 	rp := reaper.New(lcm, store, runtime, reaper.Config{Logger: logger})
 	activityPoller := activityobserver.New(store, lcm, runtime, agents, activityobserver.Config{Logger: logger})
-	// The escalation escalates unattended worker states (stuck active,
-	// unattended input waits, unlanded exits) to the live orchestrator. It
-	// reuses the same store facts as the other observers and sends through
-	// its own sessionguard nudge so pane-write safety matches the lifecycle
-	// reactions exactly.
+	// The escalation sweep reports unattended worker states (stuck active,
+	// unattended input waits, unlanded exits) to the live orchestrator,
+	// falling back to a durable human notification when the project has
+	// none. It reuses the same store facts as the other observers and sends
+	// through its own sessionguard nudge so pane-write safety matches the
+	// lifecycle reactions exactly.
 	escalationGuard := sessionguard.New(store, messenger, logger)
-	escalationCoord := escalation.New(store, escalationGuard, escalation.Config{Logger: logger})
+	escalationCoord := escalation.New(store, escalationGuard, escalation.Config{Logger: logger, Notifier: notifier})
 	return &lifecycleStack{
 		LCM:            lcm,
 		runtimeReaper:  rp,

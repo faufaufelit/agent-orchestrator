@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
+	"github.com/aoagents/agent-orchestrator/backend/internal/ports"
 	"github.com/aoagents/agent-orchestrator/backend/internal/sessionguard"
 )
 
@@ -59,6 +60,28 @@ func (f *fakeNudger) Nudge(_ context.Context, id domain.SessionID, msg string) (
 		return sessionguard.Sent, nil
 	}
 	return f.outcome, f.err
+}
+
+type fakeNotifier struct {
+	notifies []ports.NotificationIntent
+	resolves []ports.NotificationResolution
+	err      error
+}
+
+func (f *fakeNotifier) Notify(_ context.Context, intent ports.NotificationIntent) error {
+	if f.err != nil {
+		return f.err
+	}
+	f.notifies = append(f.notifies, intent)
+	return nil
+}
+
+func (f *fakeNotifier) Resolve(_ context.Context, res ports.NotificationResolution) error {
+	if f.err != nil {
+		return f.err
+	}
+	f.resolves = append(f.resolves, res)
+	return nil
 }
 
 func testSetup(now time.Time, worker domain.SessionRecord) (*fakeStore, *fakeNudger, *Coordinator) {
@@ -338,5 +361,119 @@ func TestSweepIsolatesSessions(t *testing.T) {
 	}
 	if len(nudger.calls) != 1 {
 		t.Fatalf("nudges=%d, want exactly the stuck worker escalated", len(nudger.calls))
+	}
+}
+
+func testSetupNoOrchestrator(now time.Time, worker domain.SessionRecord, notifier *fakeNotifier) (*fakeStore, *fakeNudger, *Coordinator) {
+	worker.ID = "worker-1"
+	worker.ProjectID = "p1"
+	worker.Kind = domain.KindWorker
+	if worker.Harness == "" {
+		worker.Harness = domain.AgentHarness("opencode")
+	}
+	store := &fakeStore{sessions: []domain.SessionRecord{worker}, prs: map[domain.SessionID][]domain.PullRequest{}}
+	nudger := &fakeNudger{}
+	coord := New(store, nudger, Config{Clock: func() time.Time { return now }, Notifier: notifier})
+	return store, nudger, coord
+}
+
+func TestEvaluateSessionNoOrchestratorNotifiesHumanOnce(t *testing.T) {
+	now := time.Date(2026, 9, 18, 12, 0, 0, 0, time.UTC)
+	notifier := &fakeNotifier{}
+	store, nudger, coord := testSetupNoOrchestrator(now, stuckWorker(now), notifier)
+	ctx := context.Background()
+
+	res, err := coord.EvaluateSession(ctx, "worker-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.Escalated || res.Reason != ReasonStuckActive {
+		t.Fatalf("escalated=%v reason=%q, want human fallback", res.Escalated, res.Reason)
+	}
+	if len(nudger.calls) != 0 {
+		t.Fatalf("nudges=%d, want 0 without orchestrator", len(nudger.calls))
+	}
+	if len(notifier.notifies) != 1 {
+		t.Fatalf("notifies=%d, want 1", len(notifier.notifies))
+	}
+	got := notifier.notifies[0]
+	if got.Type != domain.NotificationNeedsInput || got.SessionID != "worker-1" || got.ProjectID != "p1" {
+		t.Fatalf("intent=%+v, want needs_input for worker-1/p1", got)
+	}
+
+	// Same episode: no second notification.
+	res, err = coord.EvaluateSession(ctx, "worker-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Escalated || res.Reason != "already_escalated" {
+		t.Fatalf("re-sweep escalated=%v reason=%q, want dedup", res.Escalated, res.Reason)
+	}
+	if len(notifier.notifies) != 1 {
+		t.Fatalf("notifies=%d after re-sweep, want still 1", len(notifier.notifies))
+	}
+
+	// The worker moves and gets stuck again: resolve the old fallback,
+	// then raise a fresh one.
+	for i := range store.sessions {
+		store.sessions[i].Activity.LastActivityAt = now.Add(-time.Minute)
+	}
+	if _, err := coord.EvaluateSession(ctx, "worker-1"); err != nil {
+		t.Fatal(err)
+	}
+	if len(notifier.resolves) != 1 || notifier.resolves[0].SessionID != "worker-1" {
+		t.Fatalf("resolves=%+v, want the fallback closed on recovery", notifier.resolves)
+	}
+	for i := range store.sessions {
+		store.sessions[i].Activity.LastActivityAt = now.Add(-30 * time.Minute)
+	}
+	if _, err := coord.EvaluateSession(ctx, "worker-1"); err != nil {
+		t.Fatal(err)
+	}
+	if len(notifier.notifies) != 2 {
+		t.Fatalf("notifies=%d, want a fresh fallback for the new episode", len(notifier.notifies))
+	}
+}
+
+func TestEvaluateSessionTerminatedResolvesFallback(t *testing.T) {
+	now := time.Date(2026, 9, 18, 12, 0, 0, 0, time.UTC)
+	notifier := &fakeNotifier{}
+	store, _, coord := testSetupNoOrchestrator(now, stuckWorker(now), notifier)
+	ctx := context.Background()
+
+	if _, err := coord.EvaluateSession(ctx, "worker-1"); err != nil {
+		t.Fatal(err)
+	}
+	for i := range store.sessions {
+		store.sessions[i].IsTerminated = true
+	}
+	res, err := coord.EvaluateSession(ctx, "worker-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Escalated || res.Reason != "terminated" {
+		t.Fatalf("escalated=%v reason=%q, want terminated", res.Escalated, res.Reason)
+	}
+	if len(notifier.resolves) != 1 {
+		t.Fatalf("resolves=%d, want the fallback closed on termination", len(notifier.resolves))
+	}
+}
+
+func TestEvaluateSessionNotifyErrorRetries(t *testing.T) {
+	now := time.Date(2026, 9, 18, 12, 0, 0, 0, time.UTC)
+	notifier := &fakeNotifier{err: context.DeadlineExceeded}
+	_, _, coord := testSetupNoOrchestrator(now, stuckWorker(now), notifier)
+	ctx := context.Background()
+
+	if _, err := coord.EvaluateSession(ctx, "worker-1"); err == nil {
+		t.Fatal("want the notify error surfaced for retry")
+	}
+	notifier.err = nil
+	res, err := coord.EvaluateSession(ctx, "worker-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.Escalated || len(notifier.notifies) != 1 {
+		t.Fatalf("escalated=%v notifies=%d, want fallback after retry", res.Escalated, len(notifier.notifies))
 	}
 }

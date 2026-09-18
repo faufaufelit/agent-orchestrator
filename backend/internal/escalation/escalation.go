@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
+	"github.com/aoagents/agent-orchestrator/backend/internal/ports"
 	"github.com/aoagents/agent-orchestrator/backend/internal/sessionguard"
 )
 
@@ -69,6 +70,16 @@ type Nudger interface {
 	Nudge(context.Context, domain.SessionID, string) (sessionguard.Outcome, error)
 }
 
+// Notifier raises durable human notifications when an escalation has
+// nowhere to go on the agent side — no live orchestrator for the project.
+// It mirrors the daemon's notification sink so the wiring can pass it
+// straight through. Human fallback is episode-deduplicated exactly like
+// orchestrator nudges, and resolved when the worker moves again.
+type Notifier interface {
+	Notify(context.Context, ports.NotificationIntent) error
+	Resolve(context.Context, ports.NotificationResolution) error
+}
+
 // Result describes whether an evaluation escalated and why it skipped or
 // escalated.
 type Result struct {
@@ -78,10 +89,13 @@ type Result struct {
 
 // escalationMark records one delivered escalation so a still-stuck worker is
 // not reported on every sweep. The mark lifts as soon as the worker moves
-// (LastActivityAt advances) or changes state, re-arming the next episode.
+// (LastActivityAt advances), re-arming the next episode. notifiedHuman tracks
+// whether the episode also raised a durable human notification, so recovery
+// resolves exactly what was raised.
 type escalationMark struct {
 	reason         string
 	lastActivityAt time.Time
+	notifiedHuman  bool
 }
 
 // Coordinator evaluates worker states against the live orchestrator and owns
@@ -89,6 +103,7 @@ type escalationMark struct {
 type Coordinator struct {
 	store            Store
 	nudger           Nudger
+	notifier         Notifier
 	clock            func() time.Time
 	stuckActiveAfter time.Duration
 	needsInputAfter  time.Duration
@@ -108,13 +123,17 @@ type Config struct {
 	ExitedAfter      time.Duration
 	SweepInterval    time.Duration
 	Logger           *slog.Logger
+	// Notifier is the human fallback when no live orchestrator can take an
+	// escalation. Nil disables the fallback; orchestrator nudges work alone.
+	Notifier Notifier
 }
 
-// New constructs a escalation coordinator.
+// New constructs an escalation coordinator.
 func New(store Store, nudger Nudger, cfg Config) *Coordinator {
 	c := &Coordinator{
 		store:            store,
 		nudger:           nudger,
+		notifier:         cfg.Notifier,
 		clock:            cfg.Clock,
 		stuckActiveAfter: cfg.StuckActiveAfter,
 		needsInputAfter:  cfg.NeedsInputAfter,
@@ -145,7 +164,9 @@ func New(store Store, nudger Nudger, cfg Config) *Coordinator {
 }
 
 // EvaluateSession evaluates one session and escalates an unattended worker
-// state to the project's live orchestrator.
+// state to the project's live orchestrator. When no orchestrator can take
+// it, a durable human notification is raised instead so supervision never
+// goes quiet.
 func (c *Coordinator) EvaluateSession(ctx context.Context, id domain.SessionID) (Result, error) {
 	worker, ok, err := c.store.GetSession(ctx, id)
 	if err != nil || !ok {
@@ -157,18 +178,32 @@ func (c *Coordinator) EvaluateSession(ctx context.Context, id domain.SessionID) 
 	if worker.Kind != domain.KindWorker {
 		return Result{Reason: "not_worker"}, nil
 	}
+	last := worker.Activity.LastActivityAt
+	// A previous episode ends as soon as the worker moves again. Resolve a
+	// human fallback raised for it before evaluating the new state fresh.
+	c.mu.Lock()
+	mark, hasMark := c.escalated[id]
+	if hasMark && (!mark.lastActivityAt.Equal(last) || worker.IsTerminated) {
+		// The episode ended: the worker moved again, or died with its
+		// fallback still raised. Resolve a human fallback before evaluating
+		// the new state fresh.
+		delete(c.escalated, id)
+		hasMark = false
+		if mark.notifiedHuman {
+			c.mu.Unlock()
+			if err := c.notifyResolve(ctx, id); err != nil {
+				c.mu.Lock()
+				c.escalated[id] = mark
+				c.mu.Unlock()
+				return Result{}, err
+			}
+			c.mu.Lock()
+		}
+	}
+	c.mu.Unlock()
 	if worker.IsTerminated {
 		return Result{Reason: "terminated"}, nil
 	}
-	sessions, err := c.store.ListAllSessions(ctx)
-	if err != nil {
-		return Result{}, err
-	}
-	orchestrator, ok := liveOrchestrator(sessions, worker.ProjectID)
-	if !ok {
-		return Result{Reason: "no_orchestrator"}, nil
-	}
-	last := worker.Activity.LastActivityAt
 	if last.IsZero() {
 		// No signal yet: a freshly spawned worker must not escalate before
 		// its harness ever reports.
@@ -195,14 +230,11 @@ func (c *Coordinator) EvaluateSession(ctx context.Context, id domain.SessionID) 
 		return Result{Reason: "not_stale"}, nil
 	}
 	c.mu.Lock()
-	if mark, dup := c.escalated[id]; dup {
-		if mark.lastActivityAt.Equal(last) && mark.reason == reason {
-			c.mu.Unlock()
-			return Result{Reason: "already_escalated"}, nil
-		}
-		// The worker moved or changed state since the last escalation: the
-		// old episode is over, evaluate the new one fresh.
-		delete(c.escalated, id)
+	if mark, dup := c.escalated[id]; dup && mark.lastActivityAt.Equal(last) && mark.reason == reason {
+		// Same episode, already reported (to the orchestrator, the human,
+		// or both): stay quiet until the worker moves again.
+		c.mu.Unlock()
+		return Result{Reason: "already_escalated"}, nil
 	}
 	c.mu.Unlock()
 
@@ -225,6 +257,14 @@ func (c *Coordinator) EvaluateSession(ctx context.Context, id domain.SessionID) 
 		// an incident.
 		return Result{Reason: "merged_pr"}, nil
 	}
+	sessions, err := c.store.ListAllSessions(ctx)
+	if err != nil {
+		return Result{}, err
+	}
+	orchestrator, ok := liveOrchestrator(sessions, worker.ProjectID)
+	if !ok {
+		return c.notifyHuman(ctx, id, worker, reason, last)
+	}
 	msg := escalationMessage(worker, reason, now.Sub(last), prs)
 	outcome, err := c.nudger.Nudge(ctx, orchestrator.ID, msg)
 	if outcome != sessionguard.Sent {
@@ -238,7 +278,49 @@ func (c *Coordinator) EvaluateSession(ctx context.Context, id domain.SessionID) 
 	return Result{Escalated: true, Reason: reason}, err
 }
 
-// Sweep evaluates every live worker session, isolating per-session failures.
+// notifyHuman raises the durable human fallback when no live orchestrator
+// can take an escalation. Episode-deduplicated by the caller: one
+// notification per stuck episode, resolved on recovery.
+func (c *Coordinator) notifyHuman(ctx context.Context, id domain.SessionID, worker domain.SessionRecord, reason string, last time.Time) (Result, error) {
+	if c.notifier == nil {
+		return Result{Reason: "no_orchestrator"}, nil
+	}
+	name := worker.DisplayName
+	if name == "" {
+		name = string(id)
+	}
+	if err := c.notifier.Notify(ctx, ports.NotificationIntent{
+		Type:               domain.NotificationNeedsInput,
+		SessionID:          id,
+		ProjectID:          worker.ProjectID,
+		CreatedAt:          last,
+		SessionDisplayName: name,
+	}); err != nil {
+		return Result{}, err
+	}
+	c.mu.Lock()
+	c.escalated[id] = escalationMark{reason: reason, lastActivityAt: last, notifiedHuman: true}
+	c.mu.Unlock()
+	c.logger.Info("escalation: no orchestrator, notified human",
+		"session_id", id, "reason", reason)
+	return Result{Escalated: true, Reason: reason}, nil
+}
+
+// notifyResolve closes a human fallback once its worker moves again.
+func (c *Coordinator) notifyResolve(ctx context.Context, id domain.SessionID) error {
+	if c.notifier == nil {
+		return nil
+	}
+	return c.notifier.Resolve(ctx, ports.NotificationResolution{
+		Type:       domain.NotificationNeedsInput,
+		SessionID:  id,
+		ResolvedAt: c.clock(),
+	})
+}
+
+// Sweep evaluates every worker session, isolating per-session failures.
+// Terminated sessions are evaluated too: a worker that died while its human
+// fallback was raised must resolve it.
 func (c *Coordinator) Sweep(ctx context.Context) error {
 	sessions, err := c.store.ListAllSessions(ctx)
 	if err != nil {
@@ -246,7 +328,7 @@ func (c *Coordinator) Sweep(ctx context.Context) error {
 	}
 	evaluated := 0
 	for _, session := range sessions {
-		if session.Kind != domain.KindWorker || session.IsTerminated {
+		if session.Kind != domain.KindWorker {
 			continue
 		}
 		if _, err := c.EvaluateSession(ctx, session.ID); err != nil {
